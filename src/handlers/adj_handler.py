@@ -10,7 +10,7 @@ from src.services.adjust import send_adj
 
 logger = logging.getLogger(__name__)
 
-ADJ_ADID, ADJ_IDFA, ADJ_IDFV, ADJ_CUSTOM_EVENT, ADJ_CUSTOM_VALUE = range(200, 205)
+ADJ_ADID, ADJ_IDFA, ADJ_IDFV = range(200, 203)
 
 
 def _result_text(status: int, resp: str) -> str:
@@ -29,13 +29,24 @@ async def adj_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     games = db.get_all_games_adj()
     if not games:
-        await query.edit_message_text("❌ *لا توجد ألعاب Adjust*", parse_mode="Markdown", reply_markup=_back_kb("main_menu"))
+        await query.edit_message_text(
+            "❌ *لا توجد ألعاب Adjust*",
+            parse_mode="Markdown",
+            reply_markup=_back_kb("main_menu"),
+        )
         return ConversationHandler.END
 
-    kb = [[InlineKeyboardButton(f"{g['emoji']} {g['display_name']}", callback_data=f"adj_game_{g['id']}")] for g in games]
-    kb.append([InlineKeyboardButton("🔍 بحث", callback_data="adj_search")])
+    kb = [
+        [InlineKeyboardButton(f"{g['emoji']} {g['display_name']}", callback_data=f"adj_game_{g['id']}")]
+        for g in games
+    ]
     kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")])
-    await query.edit_message_text("📊 *اختر اللعبة - Adjust*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await query.edit_message_text(
+        "📊 *اختر اللعبة - Adjust*",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown",
+    )
+    return ConversationHandler.END
 
 
 @require_access
@@ -55,13 +66,13 @@ async def adj_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if platform == "ios":
         await query.edit_message_text(
-            "🍎 *iOS - Adjust*\n\n📱 *أدخل IDFA:*\nمثال: `12345678-1234-1234-1234-123456789012`\n\n⚠️ *سيتم استخدامه كـ GPS ADID*",
+            f"🍎 *iOS - Adjust*\n🎮 {game['display_name']}\n\n📱 *أدخل IDFA:*\nمثال: `12345678-1234-1234-1234-123456789012`",
             parse_mode="Markdown",
         )
         return ADJ_IDFA
     else:
         await query.edit_message_text(
-            "🤖 *Android - Adjust*\n\n📱 *أدخل GPS ADID:*\nمثال: `8de8604d-1318-4fd0-907c-402ea9de2529`",
+            f"🤖 *Android - Adjust*\n🎮 {game['display_name']}\n\n📱 *أدخل GPS ADID:*\nمثال: `8de8604d-1318-4fd0-907c-402ea9de2529`",
             parse_mode="Markdown",
         )
         return ADJ_ADID
@@ -94,13 +105,20 @@ async def _show_adj_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game = context.user_data.get("adj_game", {})
     events = db.get_adj_events(game_id)
     if not events:
-        await update.message.reply_text("❌ *لا توجد أحداث*", parse_mode="Markdown", reply_markup=_back_kb("adj_menu"))
+        await update.message.reply_text(
+            "❌ *لا توجد أحداث لهذه اللعبة*",
+            parse_mode="Markdown",
+            reply_markup=_back_kb("adj_menu"),
+        )
         return ConversationHandler.END
 
-    kb = [[InlineKeyboardButton(ev["display_name"], callback_data=f"adj_send_{ev['id']}")] for ev in events]
+    kb = [
+        [InlineKeyboardButton(ev["display_name"], callback_data=f"adj_send_{ev['id']}")]
+        for ev in events
+    ]
     kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="adj_menu")])
     await update.message.reply_text(
-        f"🎯 *اختر الحدث - {game.get('display_name', '')}*",
+        f"🎯 *اختر الحدث*\n🎮 {game.get('display_name', '')}",
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode="Markdown",
     )
@@ -114,6 +132,14 @@ async def adj_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     event_id = int(query.data.replace("adj_send_", ""))
 
     game_id = context.user_data.get("adj_game_id")
+    if not game_id:
+        await query.edit_message_text(
+            "❌ *انتهت الجلسة. ابدأ من جديد.*",
+            parse_mode="Markdown",
+            reply_markup=_back_kb("adj_menu"),
+        )
+        return
+
     events = db.get_adj_events(game_id)
     event = next((e for e in events if e["id"] == event_id), None)
     if not event:
@@ -123,7 +149,7 @@ async def adj_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game = context.user_data.get("adj_game", {})
     uid = update.effective_user.id
     platform = db.get_user_platform(uid)
-    proxy = db.get_proxy_for_user(uid)
+    proxy_row = db.get_proxy_for_user(uid)
 
     await query.edit_message_text("🔄 *جاري الإرسال...*", parse_mode="Markdown")
 
@@ -131,7 +157,7 @@ async def adj_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         app_token=game.get("app_token", ""),
         event_token=event.get("event_token", ""),
         gps_adid=context.user_data.get("adj_gps_adid", ""),
-        proxy=dict(proxy) if proxy else None,
+        proxy=dict(proxy_row) if proxy_row else None,
         platform=platform,
         idfa=context.user_data.get("adj_idfa"),
         idfv=context.user_data.get("adj_idfv"),
@@ -139,9 +165,11 @@ async def adj_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     result_text = _result_text(status, resp)
-    kb = [[InlineKeyboardButton("🎯 حدث آخر", callback_data=f"adj_game_{game.get('id')}")],
-          [InlineKeyboardButton("🔙 القائمة الرئيسية", callback_data="main_menu")]]
-
+    kb = [
+        [InlineKeyboardButton("🎯 حدث آخر", callback_data=f"adj_game_{game.get('id')}")],
+        [InlineKeyboardButton("🔙 قائمة الألعاب", callback_data="adj_menu")],
+        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="main_menu")],
+    ]
     await query.edit_message_text(
         f"{result_text}\n\n📝 *الحدث:* {event['display_name']}\n🎮 *اللعبة:* {game.get('display_name', '')}",
         reply_markup=InlineKeyboardMarkup(kb),
@@ -149,9 +177,12 @@ async def adj_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-def get_conversation_handler():
-    return ConversationHandler(
-        entry_points=[CallbackQueryHandler(adj_menu, pattern="^adj_menu$")],
+def get_handlers():
+    conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(adj_menu, pattern="^adj_menu$"),
+            CallbackQueryHandler(adj_game, pattern=r"^adj_game_\d+$"),
+        ],
         states={
             ADJ_ADID: [MessageHandler(filters.TEXT & ~filters.COMMAND, adj_adid)],
             ADJ_IDFA: [MessageHandler(filters.TEXT & ~filters.COMMAND, adj_idfa)],
@@ -160,11 +191,7 @@ def get_conversation_handler():
         fallbacks=[CallbackQueryHandler(adj_menu, pattern="^adj_menu$")],
         allow_reentry=True,
     )
-
-
-def get_handlers():
     return [
-        get_conversation_handler(),
-        CallbackQueryHandler(adj_game, pattern=r"^adj_game_\d+$"),
+        conv,
         CallbackQueryHandler(adj_send, pattern=r"^adj_send_\d+$"),
     ]
