@@ -12,6 +12,7 @@ from src.config import BOT_TOKEN, DATABASE_URL
 from src.database.connection import init_pool
 from src.handlers import start, platform_handler, af_handler, adj_handler
 from src.handlers import singular_handler, farm_handler, proxy_handler, admin_handler
+from src.handlers import subscription_handler
 
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
@@ -38,12 +39,19 @@ def main():
     logger.info("Starting bot...")
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Start handler
     for handler in start.get_handlers():
         app.add_handler(handler)
 
+    # Admin handler
     for handler in admin_handler.get_handlers():
         app.add_handler(handler)
 
+    # Subscription handler
+    for handler in subscription_handler.get_handlers():
+        app.add_handler(handler)
+
+    # Feature handlers
     for handler in af_handler.get_handlers():
         app.add_handler(handler)
 

@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
     ADD_EVENT_TYPE, ADD_EVENT_GAME, ADD_EVENT_NAME, ADD_EVENT_DISPLAY, ADD_EVENT_TOKEN,
     DEL_GAME_TYPE, DEL_GAME_SELECT,
     DEL_EVENT_TYPE, DEL_EVENT_GAME, DEL_EVENT_SELECT,
-) = range(600, 621)
+    # Payment settings states
+    PAYMENT_SELECT_METHOD, PAYMENT_EDIT_ADDRESS, PAYMENT_EDIT_INSTRUCTIONS, PAYMENT_EDIT_API_KEY, PAYMENT_EDIT_API_SECRET,
+    # Plans states
+    PLAN_ADD_NAME, PLAN_ADD_DURATION, PLAN_ADD_PRICE, PLAN_ADD_LIMIT, PLAN_EDIT_SELECT, PLAN_EDIT_NAME, PLAN_EDIT_DURATION, PLAN_EDIT_PRICE, PLAN_EDIT_LIMIT,
+) = range(600, 650)
 
 
 def _is_admin(uid: int) -> bool:
@@ -58,6 +62,8 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📢 إذاعة", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🎮 إدارة الألعاب", callback_data="admin_games")],
         [InlineKeyboardButton("🎯 إدارة الأحداث", callback_data="admin_events")],
+        [InlineKeyboardButton("💳 إعدادات الدفع", callback_data="admin_payment")],
+        [InlineKeyboardButton("📦 إدارة الباقات", callback_data="admin_plans")],
         [InlineKeyboardButton("🔙 رجوع", callback_data="main_menu")],
     ]
     await query.edit_message_text("👑 *لوحة تحكم المدير*", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -74,7 +80,9 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ المسموح لهم: `{stats['allowed']}`\n"
         f"🚫 المحظورون: `{stats['banned']}`\n"
         f"📨 إجمالي الطلبات: `{stats['requests']}`\n"
-        f"🌾 مزارع نشطة: `{stats['farms']}`"
+        f"🌾 مزارع نشطة: `{stats['farms']}`\n"
+        f"📦 اشتراكات نشطة: `{stats.get('active_subs', 0)}`\n"
+        f"⏳ طلبات دفع معلقة: `{stats.get('pending_reqs', 0)}`"
     )
     await query.edit_message_text(txt, parse_mode="Markdown", reply_markup=_back_kb())
 
@@ -633,6 +641,383 @@ async def del_event_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ==================== Payment Settings Management ====================
+
+@_admin_required
+async def admin_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    settings = db.get_all_payment_settings()
+
+    txt = "💳 *إعدادات طرق الدفع*\n\n"
+    kb = []
+    for s in settings:
+        status = "✅" if s.get("is_active") else "❌"
+        txt += f"{status} {s['display_name']}\n"
+        kb.append([InlineKeyboardButton(f"{status} {s['display_name']}", callback_data=f"payment_edit_{s['method']}")])
+
+    kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")])
+    await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+
+@_admin_required
+async def payment_edit_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    method = query.data.replace("payment_edit_", "")
+    context.user_data["payment_method"] = method
+    setting = db.get_payment_setting(method)
+
+    if not setting:
+        await query.edit_message_text("❌ طريقة الدفع غير موجودة", reply_markup=_back_kb("admin_payment"))
+        return ConversationHandler.END
+
+    txt = (
+        f"💳 *{setting['display_name']}*\n"
+        f"📍 العنوان: `{setting.get('address') or 'غير محدد'}`\n"
+        f"📋 التعليمات: `{setting.get('instructions') or 'لا يوجد'}`\n"
+        f"الحالة: {'✅ مفعلة' if setting.get('is_active') else '❌ معطلة'}"
+    )
+    if method == "usdt":
+        txt += f"\n🔑 API Key: {'محدد ✓' if setting.get('binance_api_key') else 'غير محدد'}"
+        txt += f"\n🔐 API Secret: {'محدد ✓' if setting.get('binance_api_secret') else 'غير محدد'}"
+
+    kb = [
+        [InlineKeyboardButton("📍 تعديل العنوان", callback_data=f"payment_set_address_{method}")],
+        [InlineKeyboardButton("📋 تعديل التعليمات", callback_data=f"payment_set_instructions_{method}")],
+    ]
+    if method == "usdt":
+        kb.append([InlineKeyboardButton("🔑 تعديل API Key", callback_data=f"payment_set_apikey_{method}")])
+        kb.append([InlineKeyboardButton("🔐 تعديل API Secret", callback_data=f"payment_set_apisecret_{method}")])
+    kb.append([InlineKeyboardButton("✅ تفعيل" if not setting.get("is_active") else "❌ تعطيل",
+                                    callback_data=f"payment_toggle_{method}")])
+    kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_payment")])
+    await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+
+@_admin_required
+async def payment_set_address_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    method = query.data.replace("payment_set_address_", "")
+    context.user_data["payment_method"] = method
+    await query.edit_message_text("📍 *أدخل العنوان الجديد:*", parse_mode="Markdown")
+    return PAYMENT_EDIT_ADDRESS
+
+
+@_admin_required
+async def payment_set_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    method = context.user_data.get("payment_method", "")
+    db.update_payment_setting_field(method, "address", update.message.text.strip())
+    await update.message.reply_text("✅ *تم تحديث العنوان*", parse_mode="Markdown", reply_markup=_back_kb("admin_payment"))
+    return ConversationHandler.END
+
+
+@_admin_required
+async def payment_set_instructions_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    method = query.data.replace("payment_set_instructions_", "")
+    context.user_data["payment_method"] = method
+    await query.edit_message_text("📋 *أدخل التعليمات الجديدة:*", parse_mode="Markdown")
+    return PAYMENT_EDIT_INSTRUCTIONS
+
+
+@_admin_required
+async def payment_set_instructions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    method = context.user_data.get("payment_method", "")
+    db.update_payment_setting_field(method, "instructions", update.message.text.strip())
+    await update.message.reply_text("✅ *تم تحديث التعليمات*", parse_mode="Markdown", reply_markup=_back_kb("admin_payment"))
+    return ConversationHandler.END
+
+
+@_admin_required
+async def payment_set_apikey_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    method = query.data.replace("payment_set_apikey_", "")
+    context.user_data["payment_method"] = method
+    await query.edit_message_text("🔑 *أدخل API Key:*", parse_mode="Markdown")
+    return PAYMENT_EDIT_API_KEY
+
+
+@_admin_required
+async def payment_set_apikey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    method = context.user_data.get("payment_method", "")
+    db.update_payment_setting_field(method, "binance_api_key", update.message.text.strip())
+    await update.message.reply_text("✅ *تم تحديث API Key*", parse_mode="Markdown", reply_markup=_back_kb("admin_payment"))
+    return ConversationHandler.END
+
+
+@_admin_required
+async def payment_set_apisecret_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    method = query.data.replace("payment_set_apisecret_", "")
+    context.user_data["payment_method"] = method
+    await query.edit_message_text("🔐 *أدخل API Secret:*", parse_mode="Markdown")
+    return PAYMENT_EDIT_API_SECRET
+
+
+@_admin_required
+async def payment_set_apisecret(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    method = context.user_data.get("payment_method", "")
+    db.update_payment_setting_field(method, "binance_api_secret", update.message.text.strip())
+    await update.message.reply_text("✅ *تم تحديث API Secret*", parse_mode="Markdown", reply_markup=_back_kb("admin_payment"))
+    return ConversationHandler.END
+
+
+@_admin_required
+async def payment_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    method = query.data.replace("payment_toggle_", "")
+    setting = db.get_payment_setting(method)
+    if setting:
+        new_status = not setting.get("is_active", False)
+        db.update_payment_setting_field(method, "is_active", "true" if new_status else "false")
+        await query.answer(f"{'تم التفعيل' if new_status else 'تم التعطيل'}", show_alert=True)
+    await payment_edit_select(update, context)
+
+
+# ==================== Plans Management ====================
+
+@_admin_required
+async def admin_plans(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plans = db.get_all_plans()
+
+    txt = "📦 *إدارة الباقات*\n\n"
+    kb = []
+    for p in plans:
+        status = "✅" if p.get("is_active") else "❌"
+        txt += f"{status} {p['name']} - {p['price']}$ | {p['daily_limit']} عملية | {p['duration_days']} يوم\n"
+        kb.append([InlineKeyboardButton(f"{status} {p['name']} ({p['price']}$)", callback_data=f"plan_edit_{p['id']}")])
+
+    kb.append([InlineKeyboardButton("➕ إضافة باقة", callback_data="plan_add")])
+    kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="admin_panel")])
+    await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+
+@_admin_required
+async def plan_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("📦 *أدخل اسم الباقة:*", parse_mode="Markdown")
+    return PLAN_ADD_NAME
+
+
+@_admin_required
+async def plan_add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["plan_name"] = update.message.text.strip()
+    await update.message.reply_text("📅 *أدخل المدة بالأيام:*\nمثال: `30` لشهر", parse_mode="Markdown")
+    return PLAN_ADD_DURATION
+
+
+@_admin_required
+async def plan_add_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        context.user_data["plan_duration"] = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ *أدخل رقماً صحيحاً*", parse_mode="Markdown")
+        return PLAN_ADD_DURATION
+    await update.message.reply_text("💰 *أدخل السعر بالدولار:*\nمثال: `15`", parse_mode="Markdown")
+    return PLAN_ADD_PRICE
+
+
+@_admin_required
+async def plan_add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        context.user_data["plan_price"] = float(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ *أدخل رقماً صحيحاً*", parse_mode="Markdown")
+        return PLAN_ADD_PRICE
+    await update.message.reply_text("📊 *أدخل الحد اليومي للعمليات:*\nمثال: `20`", parse_mode="Markdown")
+    return PLAN_ADD_LIMIT
+
+
+@_admin_required
+async def plan_add_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        daily_limit = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ *أدخل رقماً صحيحاً*", parse_mode="Markdown")
+        return PLAN_ADD_LIMIT
+
+    name = context.user_data.get("plan_name", "")
+    duration = context.user_data.get("plan_duration", 30)
+    price = context.user_data.get("plan_price", 0.0)
+
+    try:
+        db.add_plan(name, duration, price, daily_limit)
+        await update.message.reply_text(
+            f"✅ *تم إضافة الباقة*\n\n"
+            f"📦 الاسم: {name}\n"
+            f"📅 المدة: {duration} يوم\n"
+            f"💰 السعر: {price}$\n"
+            f"📊 الحد اليومي: {daily_limit} عملية",
+            parse_mode="Markdown",
+            reply_markup=_back_kb("admin_plans")
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ *خطأ:* `{e}`", parse_mode="Markdown", reply_markup=_back_kb("admin_plans"))
+
+    return ConversationHandler.END
+
+
+@_admin_required
+async def plan_edit_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan_id = int(query.data.replace("plan_edit_", ""))
+    plan = db.get_plan_by_id(plan_id)
+
+    if not plan:
+        await query.edit_message_text("❌ الباقة غير موجودة", reply_markup=_back_kb("admin_plans"))
+        return ConversationHandler.END
+
+    context.user_data["plan_id"] = plan_id
+
+    txt = (
+        f"📦 *{plan['name']}*\n\n"
+        f"📅 المدة: {plan['duration_days']} يوم\n"
+        f"💰 السعر: {plan['price']}$\n"
+        f"📊 الحد اليومي: {plan['daily_limit']} عملية\n"
+        f"الحالة: {'✅ مفعلة' if plan.get('is_active') else '❌ معطلة'}"
+    )
+    kb = [
+        [InlineKeyboardButton("📝 تعديل الاسم", callback_data=f"plan_set_name_{plan_id}")],
+        [InlineKeyboardButton("📅 تعديل المدة", callback_data=f"plan_set_duration_{plan_id}")],
+        [InlineKeyboardButton("💰 تعديل السعر", callback_data=f"plan_set_price_{plan_id}")],
+        [InlineKeyboardButton("📊 تعديل الحد اليومي", callback_data=f"plan_set_limit_{plan_id}")],
+        [InlineKeyboardButton("✅ تفعيل" if not plan.get("is_active") else "❌ تعطيل",
+                              callback_data=f"plan_toggle_{plan_id}")],
+        [InlineKeyboardButton("🗑️ حذف الباقة", callback_data=f"plan_delete_{plan_id}")],
+        [InlineKeyboardButton("🔙 رجوع", callback_data="admin_plans")],
+    ]
+    await query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+
+@_admin_required
+async def plan_set_name_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan_id = int(query.data.replace("plan_set_name_", ""))
+    context.user_data["plan_id"] = plan_id
+    await query.edit_message_text("📝 *أدخل الاسم الجديد:*", parse_mode="Markdown")
+    return PLAN_EDIT_NAME
+
+
+@_admin_required
+async def plan_set_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    plan_id = context.user_data.get("plan_id", 0)
+    plan = db.get_plan_by_id(plan_id)
+    if plan:
+        db.update_plan(plan_id, update.message.text.strip(), plan["duration_days"], plan["price"], plan["daily_limit"])
+        await update.message.reply_text("✅ *تم تحديث الاسم*", parse_mode="Markdown", reply_markup=_back_kb("admin_plans"))
+    return ConversationHandler.END
+
+
+@_admin_required
+async def plan_set_duration_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan_id = int(query.data.replace("plan_set_duration_", ""))
+    context.user_data["plan_id"] = plan_id
+    await query.edit_message_text("📅 *أدخل المدة الجديدة بالأيام:*", parse_mode="Markdown")
+    return PLAN_EDIT_DURATION
+
+
+@_admin_required
+async def plan_set_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    plan_id = context.user_data.get("plan_id", 0)
+    plan = db.get_plan_by_id(plan_id)
+    try:
+        duration = int(update.message.text.strip())
+        if plan:
+            db.update_plan(plan_id, plan["name"], duration, plan["price"], plan["daily_limit"])
+            await update.message.reply_text("✅ *تم تحديث المدة*", parse_mode="Markdown", reply_markup=_back_kb("admin_plans"))
+    except ValueError:
+        await update.message.reply_text("❌ *أدخل رقماً صحيحاً*", parse_mode="Markdown")
+        return PLAN_EDIT_DURATION
+    return ConversationHandler.END
+
+
+@_admin_required
+async def plan_set_price_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan_id = int(query.data.replace("plan_set_price_", ""))
+    context.user_data["plan_id"] = plan_id
+    await query.edit_message_text("💰 *أدخل السعر الجديد:*", parse_mode="Markdown")
+    return PLAN_EDIT_PRICE
+
+
+@_admin_required
+async def plan_set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    plan_id = context.user_data.get("plan_id", 0)
+    plan = db.get_plan_by_id(plan_id)
+    try:
+        price = float(update.message.text.strip())
+        if plan:
+            db.update_plan(plan_id, plan["name"], plan["duration_days"], price, plan["daily_limit"])
+            await update.message.reply_text("✅ *تم تحديث السعر*", parse_mode="Markdown", reply_markup=_back_kb("admin_plans"))
+    except ValueError:
+        await update.message.reply_text("❌ *أدخل رقماً صحيحاً*", parse_mode="Markdown")
+        return PLAN_EDIT_PRICE
+    return ConversationHandler.END
+
+
+@_admin_required
+async def plan_set_limit_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan_id = int(query.data.replace("plan_set_limit_", ""))
+    context.user_data["plan_id"] = plan_id
+    await query.edit_message_text("📊 *أدخل الحد اليومي الجديد:*", parse_mode="Markdown")
+    return PLAN_EDIT_LIMIT
+
+
+@_admin_required
+async def plan_set_limit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    plan_id = context.user_data.get("plan_id", 0)
+    plan = db.get_plan_by_id(plan_id)
+    try:
+        limit = int(update.message.text.strip())
+        if plan:
+            db.update_plan(plan_id, plan["name"], plan["duration_days"], plan["price"], limit)
+            await update.message.reply_text("✅ *تم تحديث الحد اليومي*", parse_mode="Markdown", reply_markup=_back_kb("admin_plans"))
+    except ValueError:
+        await update.message.reply_text("❌ *أدخل رقماً صحيحاً*", parse_mode="Markdown")
+        return PLAN_EDIT_LIMIT
+    return ConversationHandler.END
+
+
+@_admin_required
+async def plan_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan_id = int(query.data.replace("plan_toggle_", ""))
+    plan = db.get_plan_by_id(plan_id)
+    if plan:
+        new_status = not plan.get("is_active", False)
+        db.toggle_plan(plan_id, new_status)
+        await query.answer(f"{'تم التفعيل' if new_status else 'تم التعطيل'}", show_alert=True)
+    await admin_plans(update, context)
+
+
+@_admin_required
+async def plan_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    plan_id = int(query.data.replace("plan_delete_", ""))
+    db.delete_plan(plan_id)
+    await query.edit_message_text("✅ *تم حذف الباقة*", parse_mode="Markdown", reply_markup=_back_kb("admin_plans"))
+
+
+# ==================== Conversation Handler ====================
+
 def get_conversation_handler():
     return ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_panel, pattern="^admin_panel$")],
@@ -668,6 +1053,20 @@ def get_conversation_handler():
             ],
             DEL_EVENT_GAME: [CallbackQueryHandler(del_event_game_select, pattern=r"^del_event_game_\d+$")],
             DEL_EVENT_SELECT: [CallbackQueryHandler(del_event_confirm, pattern=r"^del_event_confirm_\d+$")],
+            # Payment settings
+            PAYMENT_EDIT_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_set_address)],
+            PAYMENT_EDIT_INSTRUCTIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_set_instructions)],
+            PAYMENT_EDIT_API_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_set_apikey)],
+            PAYMENT_EDIT_API_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_set_apisecret)],
+            # Plans
+            PLAN_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_add_name)],
+            PLAN_ADD_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_add_duration)],
+            PLAN_ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_add_price)],
+            PLAN_ADD_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_add_limit)],
+            PLAN_EDIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_set_name)],
+            PLAN_EDIT_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_set_duration)],
+            PLAN_EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_set_price)],
+            PLAN_EDIT_LIMIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, plan_set_limit)],
         },
         fallbacks=[CallbackQueryHandler(admin_panel, pattern="^admin_panel$")],
         allow_reentry=True,
@@ -692,4 +1091,22 @@ def get_handlers():
         CallbackQueryHandler(admin_events, pattern="^admin_events$"),
         CallbackQueryHandler(admin_add_event_type, pattern="^admin_add_event$"),
         CallbackQueryHandler(admin_delete_event, pattern="^admin_delete_event$"),
+        # Payment settings
+        CallbackQueryHandler(admin_payment, pattern="^admin_payment$"),
+        CallbackQueryHandler(payment_edit_select, pattern=r"^payment_edit_"),
+        CallbackQueryHandler(payment_set_address_prompt, pattern=r"^payment_set_address_"),
+        CallbackQueryHandler(payment_set_instructions_prompt, pattern=r"^payment_set_instructions_"),
+        CallbackQueryHandler(payment_set_apikey_prompt, pattern=r"^payment_set_apikey_"),
+        CallbackQueryHandler(payment_set_apisecret_prompt, pattern=r"^payment_set_apisecret_"),
+        CallbackQueryHandler(payment_toggle, pattern=r"^payment_toggle_"),
+        # Plans
+        CallbackQueryHandler(admin_plans, pattern="^admin_plans$"),
+        CallbackQueryHandler(plan_add_start, pattern="^plan_add$"),
+        CallbackQueryHandler(plan_edit_select, pattern=r"^plan_edit_\d+$"),
+        CallbackQueryHandler(plan_set_name_prompt, pattern=r"^plan_set_name_"),
+        CallbackQueryHandler(plan_set_duration_prompt, pattern=r"^plan_set_duration_"),
+        CallbackQueryHandler(plan_set_price_prompt, pattern=r"^plan_set_price_"),
+        CallbackQueryHandler(plan_set_limit_prompt, pattern=r"^plan_set_limit_"),
+        CallbackQueryHandler(plan_toggle, pattern=r"^plan_toggle_"),
+        CallbackQueryHandler(plan_delete, pattern=r"^plan_delete_"),
     ]

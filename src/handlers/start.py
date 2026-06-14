@@ -12,10 +12,21 @@ logger = logging.getLogger(__name__)
 def _build_main_keyboard(uid: int) -> InlineKeyboardMarkup:
     platform = db.get_user_platform(uid)
     platform_emoji = "🤖" if platform == "android" else "🍎"
+    sub = db.get_active_subscription(uid)
 
     kb = []
     if uid in ADMIN_IDS:
         kb.append([InlineKeyboardButton("👑 لوحة التحكم", callback_data="admin_panel")])
+
+    # Show subscription status
+    if sub and uid not in ADMIN_IDS:
+        used = sub.get("daily_used", 0)
+        limit = sub.get("daily_limit", 0)
+        sub_btn = InlineKeyboardButton(f"📦 اشتراكك ({used}/{limit})", callback_data="sub_menu")
+    else:
+        sub_btn = InlineKeyboardButton("📦 اشتراك", callback_data="sub_menu")
+
+    kb.append([sub_btn])
     kb.append([InlineKeyboardButton("📱 AppsFlyer", callback_data="af_menu")])
     kb.append([InlineKeyboardButton("📊 Adjust", callback_data="adj_menu")])
     kb.append([InlineKeyboardButton("🌟 Singular", callback_data="singular_menu")])
@@ -31,6 +42,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     platform = db.get_user_platform(uid)
     platform_name = "Android 🤖" if platform == "android" else "iOS 🍎"
 
+    sub = db.get_active_subscription(uid)
+    sub_text = ""
+    if sub and uid not in ADMIN_IDS:
+        used = sub.get("daily_used", 0)
+        limit = sub.get("daily_limit", 0)
+        remaining = limit - used
+        sub_text = f"\n📦 *اشتراكك:* {sub.get('plan_name', '')} | متبقي: `{remaining}/{limit}` عملية"
+
     text = (
         "🔥 *AK Jumper Bot* 🔥\n\n"
         "✨ *اختر الخدمة* ✨\n\n"
@@ -40,6 +59,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "┃ 🌾 مزرعة الجمبرة\n"
         "┃ 🔧 بروكسي\n\n"
         f"📱 النظام الحالي: {platform_name}"
+        f"{sub_text}"
     )
 
     kb = _build_main_keyboard(uid)

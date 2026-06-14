@@ -145,6 +145,84 @@ CREATE TABLE IF NOT EXISTS farm_tasks (
 CREATE INDEX IF NOT EXISTS idx_farm_tasks_user   ON farm_tasks (user_id);
 CREATE INDEX IF NOT EXISTS idx_farm_tasks_status ON farm_tasks (status);
 
+-- ==================== Subscriptions ====================
+
+CREATE TABLE IF NOT EXISTS subscription_plans (
+    id            SERIAL PRIMARY KEY,
+    name          TEXT NOT NULL,
+    duration_days INTEGER NOT NULL,
+    price         REAL NOT NULL,
+    daily_limit   INTEGER NOT NULL,
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id               SERIAL PRIMARY KEY,
+    user_id          BIGINT NOT NULL,
+    plan_id          INTEGER NOT NULL,
+    plan_name        TEXT NOT NULL,
+    daily_limit      INTEGER NOT NULL,
+    daily_used       INTEGER NOT NULL DEFAULT 0,
+    last_reset_date  DATE,
+    start_date       TIMESTAMP DEFAULT NOW(),
+    end_date         TIMESTAMP NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'active',
+    created_at       TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions (user_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions (status);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_end ON subscriptions (end_date);
+
+-- ==================== Payment Settings ====================
+
+CREATE TABLE IF NOT EXISTS payment_settings (
+    method            TEXT PRIMARY KEY,
+    display_name      TEXT NOT NULL,
+    address           TEXT NOT NULL DEFAULT '',
+    instructions      TEXT NOT NULL DEFAULT '',
+    binance_api_key   TEXT NOT NULL DEFAULT '',
+    binance_api_secret TEXT NOT NULL DEFAULT '',
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at        TIMESTAMP DEFAULT NOW()
+);
+
+INSERT INTO payment_settings (method, display_name, address, instructions, is_active) VALUES
+    ('usdt', '💎 USDT (TRC20)', '', 'أرسل المبلغ إلى العنوان أعلاه، ثم أدخل رقم العملية.', TRUE),
+    ('sham_cash', '💰 شام كاش', '', 'أرسل المبلغ إلى الرقم أعلاه، ثم أرسل صورة إثبات الدفع.', TRUE),
+    ('syriatel_cash', '💰 سرياتيل كاش', '', 'أرسل المبلغ إلى الرقم أعلاه، ثم أرسل صورة إثبات الدفع.', TRUE)
+ON CONFLICT (method) DO NOTHING;
+
+-- ==================== Payment Requests ====================
+
+CREATE TABLE IF NOT EXISTS payment_requests (
+    id              SERIAL PRIMARY KEY,
+    user_id         BIGINT NOT NULL,
+    user_name       TEXT NOT NULL,
+    user_username   TEXT NOT NULL,
+    plan_id         INTEGER NOT NULL,
+    plan_name       TEXT NOT NULL,
+    method          TEXT NOT NULL,
+    amount          REAL NOT NULL,
+    transaction_id  TEXT NOT NULL DEFAULT '',
+    proof_file_id   TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    admin_id        BIGINT,
+    created_at      TIMESTAMP DEFAULT NOW(),
+    processed_at    TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_requests_user ON payment_requests (user_id);
+CREATE INDEX IF NOT EXISTS idx_payment_requests_status ON payment_requests (status);
+
+-- ==================== Default Plans ====================
+
+INSERT INTO subscription_plans (name, duration_days, price, daily_limit, is_active) VALUES
+    ('باقة يومية', 1, 2, 10, TRUE),
+    ('باقة أسبوعية', 7, 5, 15, TRUE),
+    ('باقة شهرية', 30, 15, 20, TRUE)
+ON CONFLICT DO NOTHING;
+
 -- =====================================================
 -- Default admin users (change IDs as needed)
 -- =====================================================

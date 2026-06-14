@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any
 import logging
 
@@ -131,17 +131,21 @@ def get_user_by_identifier(identifier: str) -> Optional[Dict]:
 
 
 def get_stats() -> Dict[str, int]:
-    total = execute("SELECT COUNT(*) AS cnt FROM users", fetch="one") or {"cnt": 0}
-    allowed = execute("SELECT COUNT(*) AS cnt FROM users WHERE allowed = 1", fetch="one") or {"cnt": 0}
-    banned = execute("SELECT COUNT(*) AS cnt FROM users WHERE banned = 1", fetch="one") or {"cnt": 0}
+    total    = execute("SELECT COUNT(*) AS cnt FROM users", fetch="one") or {"cnt": 0}
+    allowed  = execute("SELECT COUNT(*) AS cnt FROM users WHERE allowed = 1", fetch="one") or {"cnt": 0}
+    banned   = execute("SELECT COUNT(*) AS cnt FROM users WHERE banned = 1", fetch="one") or {"cnt": 0}
     requests = execute("SELECT COALESCE(SUM(total_requests), 0) AS cnt FROM users", fetch="one") or {"cnt": 0}
-    farms = execute("SELECT COUNT(*) AS cnt FROM farm_tasks WHERE status = 'running'", fetch="one") or {"cnt": 0}
+    farms    = execute("SELECT COUNT(*) AS cnt FROM farm_tasks WHERE status = 'running'", fetch="one") or {"cnt": 0}
+    active_subs = execute("SELECT COUNT(*) AS cnt FROM subscriptions WHERE status = 'active' AND end_date > NOW()", fetch="one") or {"cnt": 0}
+    pending_reqs = execute("SELECT COUNT(*) AS cnt FROM payment_requests WHERE status = 'pending'", fetch="one") or {"cnt": 0}
     return {
-        "total": total["cnt"],
-        "allowed": allowed["cnt"],
-        "banned": banned["cnt"],
-        "requests": requests["cnt"],
-        "farms": farms["cnt"],
+        "total":       total["cnt"],
+        "allowed":     allowed["cnt"],
+        "banned":      banned["cnt"],
+        "requests":    requests["cnt"],
+        "farms":       farms["cnt"],
+        "active_subs": active_subs["cnt"],
+        "pending_reqs": pending_reqs["cnt"],
     }
 
 
@@ -441,5 +445,239 @@ def get_stoppable_tasks(user_id: int) -> List[Dict]:
     return execute(
         "SELECT id, task_name FROM farm_tasks WHERE user_id = %s AND status = 'running'",
         (user_id,),
+        fetch="all",
+    ) or []
+
+
+# ==================== Subscriptions ====================
+
+def get_active_subscription(user_id: int) -> Optional[Dict]:
+    row = execute(
+        """
+        SELECT id, plan_name, daily_limit, daily_used, last_reset_date, end_date
+        FROM subscriptions
+        WHERE user_id = %s AND status = 'active' AND end_date > NOW()
+        ORDER BY end_date DESC
+        LIMIT 1
+        """,
+        (user_id,),
+        fetch="one",
+    )
+    if not row:
+        return None
+    today = date.today()
+    last_reset = row.get("last_reset_date")
+    if isinstance(last_reset, str):
+        try:
+            from datetime import date as _date
+            last_reset = _date.fromisoformat(last_reset)
+        except Exception:
+            last_reset = None
+    if last_reset != today:
+        execute(
+            "UPDATE subscriptions SET daily_used = 0, last_reset_date = %s WHERE user_id = %s AND status = 'active' AND end_date > NOW()",
+            (today, user_id),
+        )
+        row = dict(row)
+        row["daily_used"] = 0
+        row["last_reset_date"] = today
+    return row
+
+
+def increment_subscription_usage(user_id: int) -> None:
+    execute(
+        """
+        UPDATE subscriptions
+        SET daily_used = daily_used + 1
+        WHERE user_id = %s AND status = 'active' AND end_date > NOW()
+        """,
+        (user_id,),
+    )
+
+
+def create_subscription(user_id: int, plan_id: int, plan_name: str,
+                        duration_days: int, daily_limit: int) -> None:
+    execute(
+        "UPDATE subscriptions SET status = 'expired' WHERE user_id = %s AND status = 'active'",
+        (user_id,),
+    )
+    end_date = datetime.now() + timedelta(days=duration_days)
+    execute(
+        """
+        INSERT INTO subscriptions (user_id, plan_id, plan_name, daily_limit, start_date, end_date)
+        VALUES (%s, %s, %s, %s, NOW(), %s)
+        """,
+        (user_id, plan_id, plan_name, daily_limit, end_date),
+    )
+    execute("UPDATE users SET allowed = 1 WHERE user_id = %s", (user_id,))
+
+
+# ==================== Subscription Plans ====================
+
+def get_active_plans() -> List[Dict]:
+    return execute(
+        "SELECT id, name, duration_days, price, daily_limit FROM subscription_plans WHERE is_active = TRUE ORDER BY price",
+        fetch="all",
+    ) or []
+
+
+def get_all_plans() -> List[Dict]:
+    return execute(
+        "SELECT id, name, duration_days, price, daily_limit, is_active FROM subscription_plans ORDER BY price",
+        fetch="all",
+    ) or []
+
+
+def get_plan_by_id(plan_id: int) -> Optional[Dict]:
+    return execute(
+        "SELECT id, name, duration_days, price, daily_limit, is_active FROM subscription_plans WHERE id = %s",
+        (plan_id,),
+        fetch="one",
+    )
+
+
+def add_plan(name: str, duration_days: int, price: float, daily_limit: int) -> None:
+    execute(
+        "INSERT INTO subscription_plans (name, duration_days, price, daily_limit) VALUES (%s, %s, %s, %s)",
+        (name, duration_days, price, daily_limit),
+    )
+
+
+def toggle_plan(plan_id: int, is_active: bool) -> None:
+    execute("UPDATE subscription_plans SET is_active = %s WHERE id = %s", (is_active, plan_id))
+
+
+def delete_plan(plan_id: int) -> None:
+    execute("DELETE FROM subscription_plans WHERE id = %s", (plan_id,))
+
+
+def update_plan(plan_id: int, name: str, duration_days: int, price: float, daily_limit: int) -> None:
+    execute(
+        "UPDATE subscription_plans SET name=%s, duration_days=%s, price=%s, daily_limit=%s WHERE id=%s",
+        (name, duration_days, price, daily_limit, plan_id),
+    )
+
+
+# ==================== Payment Settings ====================
+
+def get_payment_setting(method: str) -> Optional[Dict]:
+    return execute(
+        "SELECT * FROM payment_settings WHERE method = %s",
+        (method,),
+        fetch="one",
+    )
+
+
+def get_all_payment_settings() -> List[Dict]:
+    return execute(
+        "SELECT * FROM payment_settings ORDER BY method",
+        fetch="all",
+    ) or []
+
+
+def get_active_payment_settings() -> List[Dict]:
+    return execute(
+        "SELECT * FROM payment_settings WHERE is_active = TRUE ORDER BY method",
+        fetch="all",
+    ) or []
+
+
+def update_payment_setting_field(method: str, field: str, value: str) -> None:
+    allowed = {"address", "instructions", "binance_api_key", "binance_api_secret", "is_active", "display_name"}
+    if field not in allowed:
+        return
+    execute(
+        f"UPDATE payment_settings SET {field} = %s, updated_at = NOW() WHERE method = %s",
+        (value, method),
+    )
+
+
+def set_payment_setting(method: str, address: str, instructions: str,
+                        binance_api_key: str = "", binance_api_secret: str = "",
+                        display_name: str = "", is_active: bool = True) -> None:
+    execute(
+        """
+        INSERT INTO payment_settings (method, address, instructions, binance_api_key, binance_api_secret, display_name, is_active)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (method) DO UPDATE SET
+            address = EXCLUDED.address,
+            instructions = EXCLUDED.instructions,
+            binance_api_key = EXCLUDED.binance_api_key,
+            binance_api_secret = EXCLUDED.binance_api_secret,
+            display_name = EXCLUDED.display_name,
+            is_active = EXCLUDED.is_active,
+            updated_at = NOW()
+        """,
+        (method, address, instructions, binance_api_key, binance_api_secret, display_name, is_active),
+    )
+
+
+# ==================== Payment Requests ====================
+
+def create_payment_request(
+    user_id: int, user_name: str, user_username: str,
+    plan_id: int, plan_name: str, method: str, amount: float,
+    transaction_id: str = "", proof_file_id: str = "",
+) -> int:
+    row = execute(
+        """
+        INSERT INTO payment_requests
+            (user_id, user_name, user_username, plan_id, plan_name, method, amount, transaction_id, proof_file_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (user_id, user_name, user_username, plan_id, plan_name, method, amount, transaction_id, proof_file_id),
+        fetch="one",
+    )
+    return row["id"] if row else 0
+
+
+def process_payment_request_auto(
+    user_id: int, user_name: str, user_username: str,
+    plan_id: int, plan_name: str, method: str, amount: float, transaction_id: str,
+) -> None:
+    execute(
+        """
+        INSERT INTO payment_requests
+            (user_id, user_name, user_username, plan_id, plan_name, method, amount, transaction_id, status, processed_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'approved', NOW())
+        """,
+        (user_id, user_name, user_username, plan_id, plan_name, method, amount, transaction_id),
+    )
+
+
+def get_payment_request(request_id: int) -> Optional[Dict]:
+    return execute(
+        "SELECT * FROM payment_requests WHERE id = %s",
+        (request_id,),
+        fetch="one",
+    )
+
+
+def process_payment_request(request_id: int, status: str, admin_id: int) -> None:
+    execute(
+        "UPDATE payment_requests SET status = %s, admin_id = %s, processed_at = NOW() WHERE id = %s",
+        (status, admin_id, request_id),
+    )
+
+
+def get_pending_requests() -> List[Dict]:
+    return execute(
+        "SELECT * FROM payment_requests WHERE status = 'pending' ORDER BY created_at DESC",
+        fetch="all",
+    ) or []
+
+
+def get_user_subscriptions(user_id: int) -> List[Dict]:
+    return execute(
+        "SELECT * FROM subscriptions WHERE user_id = %s ORDER BY created_at DESC",
+        (user_id,),
+        fetch="all",
+    ) or []
+
+
+def get_all_payment_requests() -> List[Dict]:
+    return execute(
+        "SELECT * FROM payment_requests ORDER BY created_at DESC LIMIT 100",
         fetch="all",
     ) or []
