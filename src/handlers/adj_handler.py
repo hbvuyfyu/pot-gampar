@@ -78,13 +78,11 @@ async def adj_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ADJ_ADID
 
 
-@require_access
 async def adj_adid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["adj_gps_adid"] = update.message.text.strip()
     return await _show_adj_events(update, context)
 
 
-@require_access
 async def adj_idfa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["adj_idfa"] = update.message.text.strip()
     await update.message.reply_text(
@@ -94,7 +92,6 @@ async def adj_idfa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADJ_IDFV
 
 
-@require_access
 async def adj_idfv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["adj_idfv"] = update.message.text.strip()
     return await _show_adj_events(update, context)
